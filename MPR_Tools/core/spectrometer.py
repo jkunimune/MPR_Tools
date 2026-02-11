@@ -127,12 +127,12 @@ class MPRSpectrometer:
                                 y_aperture = (y_foil + self.conversion_foil.aperture_radius * 
                                             np.sin(phi) * ar_idx / aperture_radial_points)
                                 
-                                # Calculate angles
-                                angle_x = np.arctan((x_aperture - x_foil) / self.conversion_foil.aperture_distance)
-                                angle_y = np.arctan((y_aperture - y_foil) / self.conversion_foil.aperture_distance)
+                                # Calculate transverse momenta
+                                a = (x_aperture - x_foil) / self.conversion_foil.aperture_distance * np.sqrt(1 + energy_offset)
+                                b = (y_aperture - y_foil) / self.conversion_foil.aperture_distance * np.sqrt(1 + energy_offset)
                                 
                                 # Check for duplicates
-                                ray = [x_foil, -angle_x, y_foil, -angle_y, energy_offset, energy]
+                                ray = [x_foil, -a, y_foil, -b, energy_offset, energy]
                                 is_duplicate = False
                                 
                                 for prev_idx in range(ray_index):
@@ -297,12 +297,12 @@ class MPRSpectrometer:
                 x_aperture = x0 + conversion_foil.aperture_distance * np.tan(theta_s) * np.cos(phi_s)
                 y_aperture = y0 + conversion_foil.aperture_distance * np.tan(theta_s) * np.sin(phi_s)
                 
-                angle_x = np.arctan((x_aperture - x0) / conversion_foil.aperture_distance)
-                angle_y = np.arctan((y_aperture - y0) / conversion_foil.aperture_distance)
+                a0 = (x_aperture - x0) / conversion_foil.aperture_distance * np.sqrt(1 + energy_relative)
+                b0 = (y_aperture - y0) / conversion_foil.aperture_distance * np.sqrt(1 + energy_relative)
                 
                 energy_relative = (hydron_energy - reference_energy) / reference_energy
                 
-                batch_results = np.vstack((batch_results, np.array([x0, angle_x, y0, angle_y, energy_relative, neutron_energy])))
+                batch_results = np.vstack((batch_results, np.array([x0, a0, y0, b0, energy_relative, neutron_energy])))
                 
                 # Update progress counter thread-safely
                 with progress_lock:
@@ -461,7 +461,7 @@ class MPRSpectrometer:
                         monomial *= relative_mass**term_powers[6]
                     
                     # Add contributions to each coordinate
-                    for coord in range(4):  # x, angle_x, y, angle_y
+                    for coord in range(4):  # x, a, y, b
                         output_ray[coord] += transfer_map[coord, j] * monomial
             
             output_batch[i] = output_ray
@@ -479,9 +479,9 @@ class MPRSpectrometer:
         
         df = pd.DataFrame({
             'x0': self.input_beam[:, 0],
-            'angle_x': self.input_beam[:, 1],
+            'a0': self.input_beam[:, 1],
             'y0': self.input_beam[:, 2],
-            'angle_y': self.input_beam[:, 3],
+            'b0': self.input_beam[:, 3],
             'energy_relative': self.input_beam[:, 4],
             'neutron_energy': self.input_beam[:, 5]
         })
@@ -495,9 +495,9 @@ class MPRSpectrometer:
         
         df = pd.DataFrame({
             'x0': self.output_beam[:, 0],
-            'angle_x': self.output_beam[:, 1],
+            'a0': self.output_beam[:, 1],
             'y0': self.output_beam[:, 2],
-            'angle_y': self.output_beam[:, 3],
+            'b0': self.output_beam[:, 3],
             'energy_relative': self.output_beam[:, 4]
         })
         df.to_csv(filepath, index=False)

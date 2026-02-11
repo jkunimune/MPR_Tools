@@ -433,11 +433,11 @@ class SpectrometerPlotter:
         
         for i in range(0, len(self.spectrometer.input_beam), max(1, len(self.spectrometer.input_beam) // num_rays_to_plot)):
             ray = self.spectrometer.input_beam[i]
-            x0, angle_x, y0, angle_y = ray[:4]
+            x0, a0, y0, b0 = ray[:4]
             y0 *= 100 # cm
             
             # Calculate ray trajectory
-            slope = np.tan(angle_y)
+            slope = b0
             y_trajectory = slope * z_coords + y0
             
             ax.plot(z_coords, y_trajectory, alpha=0.4, color=self.primary_color, linewidth=0.5)
@@ -447,11 +447,11 @@ class SpectrometerPlotter:
             spec2: MPRSpectrometer = self.dual_data['spectrometer']
             for i in range(0, len(spec2.input_beam), max(1, len(spec2.input_beam) // num_rays_to_plot)):
                 ray = spec2.input_beam[i]
-                x0, angle_x, y0, angle_y = ray[:4]
+                x0, a0, y0, b0 = ray[:4]
                 y0 *= 100 # cm
                 
                 # Calculate ray trajectory
-                slope = np.tan(angle_y)
+                slope = b0
                 y_trajectory = slope * z_coords + y0
                 
                 ax.plot(z_coords, y_trajectory, alpha=0.4, color=self.dual_data['secondary_color'], linewidth=0.5)
