@@ -185,6 +185,7 @@ class PerformanceAnalyzer:
         include_kinematics: bool = True,
         include_stopping_power_loss: bool = True,
         output_filename: Optional[str] = None,
+        map_order: int = 5,
         reset: bool = True,
         executor: Optional[Executor] = None,
         max_workers: Optional[int] = None,
@@ -201,6 +202,7 @@ class PerformanceAnalyzer:
             include_kinematics: Include kinematic effects
             include_stopping_power_loss: Include stopping power energy loss via SRIM
             output_filename: Name for output data file
+            map_order: Order of transfer map to apply (1-5 typically)
             reset: Whether to regenerate the dataset rather than loading an existing one
             executor: Pool of workers to use (if None, we will make our own)
             max_workers: Maximum number of worker processes (None for CPU count)
@@ -251,7 +253,8 @@ class PerformanceAnalyzer:
                         max_workers=max_workers,)
                     spec.apply_transfer_map(save_beam=False,
                         executor=executor,
-                        max_workers=max_workers)
+                        max_workers=max_workers,
+                        map_order=map_order)
                     
                     positions = spec.output_beam[:,0]
                     positions_width[i], positions_mean[i] = PerformanceAnalyzer.fwfm(positions, fractional_max=fractional_max)
