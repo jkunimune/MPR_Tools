@@ -453,7 +453,7 @@ class ConversionFoil:
                     path_length = (-z0) / np.cos(theta_scatter)
                     recoil_energy = self.calculate_stopping_power_loss(recoil_energy, path_length)
 
-                accepted = True
+                accepted = recoil_energy > 0
             else:
                 rejected += 1
 
