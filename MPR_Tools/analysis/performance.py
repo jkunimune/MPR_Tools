@@ -52,8 +52,21 @@ class PerformanceAnalyzer:
         bandwidth_factor = kde.factor
         bandsigma = bandwidth_factor * np.std(data)
         bandwidth = 2*np.sqrt(2*np.log(2)) * bandsigma
-        
-        x = np.linspace(data.min(), data.max(), round(5 * (data.max() - data.min()) / bandwidth))
+
+        # Estimate the peak location so that we can clip the data if it's extremely broad compared to the bandwidth
+        data_min, data_max = data.min(), data.max()
+        if data_max - data_min > 1e9*bandwidth:
+            approximate_position = np.median(data)
+        else:
+            coarse_bin_edges = np.linspace(data.min(), data.max(), round((data.max() - data.min()) / bandwidth))
+            coarse_bin_centers = (coarse_bin_edges[0:-1] + coarse_bin_edges[1:])/2
+            coarse_histogram, _ = np.histogram(data, coarse_bin_edges)
+            approximate_position = coarse_bin_centers[np.argmax(coarse_histogram)]
+        lower_bound = data[data >= approximate_position - 100*bandwidth].min()  # this limits it to 1000 samples
+        upper_bound = data[data <= approximate_position + 100*bandwidth].max()
+
+        # Calculate the density curve
+        x = np.linspace(lower_bound, upper_bound, max(4, round(5 * (upper_bound - lower_bound) / bandwidth)))
         y = kde(x)
 
         # Find the most extreme data points where y >= y_cutoff
