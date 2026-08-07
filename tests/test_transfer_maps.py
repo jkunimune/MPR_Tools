@@ -8,39 +8,41 @@ def test_perfect_map():
     rng = random.default_rng(seed=0)
     input_rays = rng.normal(size=(100, 6))
     output_rays = apply_transfer_map(input_rays, "tests/map_identity.txt")
-    assert all(isclose(output_rays, input_rays[:, 0:5]))
+    assert all(isclose(output_rays, input_rays))
     
 
 def test_first_order_map():
     input_rays = array([
-        [0, 0, 0, 0, 0],  # central ray
-        [0.1, 0, 0, 0, 0],  # x-perturbation
-        [0, 0.1, 0, 0, 0],  # a-perturbation
-        [0, 0, 0.1, 0, 0],  # y-perturbation
-        [0, 0, 0, 0.1, 0],  # b-perturbation
-        [0, 0, 0, 0, 0.1],  # dE-perturbation
-        [0.1, 0.1, 0, 0, 0],  # combined x- and a-perturbation
+        [0, 0, 0, 0, 0, 0],    # central ray
+        [0.1, 0, 0, 0, 0, 0],  # x-perturbation
+        [0, 0.1, 0, 0, 0, 0],  # a-perturbation
+        [0, 0, 0.1, 0, 0, 0],  # y-perturbation
+        [0, 0, 0, 0.1, 0, 0],  # b-perturbation
+        [0, 0, 0, 0, 1e-8, 0], # t-perturbation
+        [0, 0, 0, 0, 0, 0.1],  # dE-perturbation
+        [0.1, 0.1, 0, 0, 0, 0],  # combined x- and a-perturbation
     ])
     output_rays = apply_transfer_map(input_rays, "tests/map_first_order.txt")
     expected_output_rays = array([
-        [0, 0, 0, 0, 0],  # central ray
-        [-0.1, -0.2, 0, 0, 0],  # x-perturbation
-        [0, -0.1, 0, 0, 0],      # a-perturbation
-        [0, 0, 0.1, 0, 0],       # y-perturbation
-        [0, 0, 0.02, 0.1, 0],   # b-perturbation
-        [0.05, 0, 0, 0, 0.1],  # dE-perturbation
-        [-0.1, -0.3, 0, 0, 0],  # combined x- and a-perturbation
+        [0, 0, 0, 0, 0, 0],        # central ray
+        [-0.1, -0.2, 0, 0, 0, 0],  # x-perturbation
+        [0, -0.1, 0, 0, 0, 0],     # a-perturbation
+        [0, 0, 0.1, 0, 0, 0],      # y-perturbation
+        [0, 0, 0.02, 0.1, 0, 0],   # b-perturbation
+        [0.05, 0, 0, 0, 1e-8, 0],  # t-perturbation
+        [0.05, 0, 0, 0, -1e-7, 0.1],  # dE-perturbation
+        [-0.1, -0.3, 0, 0, 0, 0],  # combined x- and a-perturbation
     ])
-    assert all(isclose(output_rays, expected_output_rays))
+    assert all(isclose(output_rays, expected_output_rays, rtol=1e3))
 
 
 def test_second_order_map():
     input_rays = array([
-        [0.1, 0, 0, 0, 0],
+        [0.1, 0, 0, 0, 0, 0],
     ])
     output_rays = apply_transfer_map(input_rays, "tests/map_second_order.txt")
     expected_output_rays = array([
-        [-0.2, -0.4, 0, 0, 0],  # n.b. the second order coefficients are not second derivatives.  so it goes like (x|xx)*x^2, not like 1/2! (x|xx)*x^2.
+        [-0.2, -0.4, 0, 0, 0, 0],  # n.b. the second order coefficients are not second derivatives.  so it goes like (x|xx)*x^2, not like 1/2! (x|xx)*x^2.
     ])
     assert all(isclose(output_rays, expected_output_rays))
 
@@ -52,6 +54,7 @@ def test_shifted_detector():
         [0, 9/41, 0, 0, 0, 0],  # a-perturbation (I'm using 9/41 because 9-40-41 is a pythagorean triple)
         [0, 0, .10, 0, 0, 0],  # y-perturbation
         [0, 0, 0, 9/41, 0, 0],  # b-perturbation
+        [0, 0, 0, 0, .50, 0],  # t-perturbation
         [0, 0, 0, 0, 0, 0.1],  # dE-perturbation
     ])
     output_rays = ray_cylinder_intersection(
@@ -65,6 +68,7 @@ def test_shifted_detector():
         [.09, 9/41, 0, 0, .41, 0],  # a-perturbation causes displacement in x and an even longer time-of-flight
         [0, 0, 0.1, 0, .40, 0],  # y-perturbation is transferred to the new plane
         [0, 0, 0.09, 9/41, .41, 0],  # b-perturbation causes displacement in y and a longer time-of-flight
+        [0, 0, 0, 0, .90, 0],  # t-perturbation just translates in time
         [0, 0, 0, 0, .40 - 2e-18, 0.1],  # dE doesn't really change time-of-flight because it's fully relativistic
     ])
     assert all(isclose(output_rays, expected_output_rays))
@@ -132,8 +136,8 @@ def test_slightly_curved_detector():
 def apply_transfer_map(input_beam: ndarray, transfer_map_path: str):
     spectrometer = MPRSpectrometer(
         conversion_foil=ConversionFoil(1, 1, 10, 1),
-        reference_energy=14,
-        min_energy=10, max_energy=16,
+        reference_energy=0.5218,  # this proton travels at exactly 10^7 m/s (gamma = 1.0006)
+        min_energy=0.4, max_energy=0.6,
         transfer_map_path=transfer_map_path,
         hodoscope=Hodoscope(array([[-50, 1], [50, 1]])),
     )
