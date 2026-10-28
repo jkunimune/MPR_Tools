@@ -1,7 +1,7 @@
 from concurrent.futures.process import ProcessPoolExecutor
 
 from matplotlib import pyplot as plt
-from numpy import array, interp, histogram, average, isclose, linspace, exp, where, arange, gradient
+from numpy import array, interp, histogram, average, isclose, linspace, exp, where, arange
 from scipy import integrate
 
 from MPR_Tools import MPRSpectrometer, ConversionFoil, Hodoscope, SpectrometerPlotter, PerformanceAnalyzer

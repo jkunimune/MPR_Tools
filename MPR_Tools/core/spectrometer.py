@@ -8,6 +8,7 @@ from tqdm import tqdm
 from concurrent.futures import Executor
 import multiprocessing as mp
 
+from .matter_interactions import ContinuousProbabilityDistribution, DiscreteProbabilityDistribution
 from ..config.constants import NEUTRON_MASS, LIGHT_SPEED, MASS_TO_MEV
 from .conversion_foil import ConversionFoil
 from .hodoscope import Hodoscope
@@ -332,7 +333,13 @@ class MPRSpectrometer:
         """
         # Create an independent RNG for this worker to ensure reproducibility
         rng = np.random.default_rng(seed_offset)
-
+        
+        # Precompute inverse CDF for continuous energy sampling
+        if len(incident_energies) > 1 and continuous_energy_sampling:
+            incident_energy_distribution = ContinuousProbabilityDistribution(incident_energies, sampling_distribution)
+        else:
+            incident_energy_distribution = DiscreteProbabilityDistribution(incident_energies, sampling_distribution)
+    
         particle_rest_energy = conversion_foil.particle_mass * MASS_TO_MEV  # MeV
         reference_gamma = 1 + reference_energy / particle_rest_energy   # Lorentz factor of the central ray
 
@@ -342,14 +349,12 @@ class MPRSpectrometer:
             try:
                 x0, y0, theta_s, phi_s, incident_energy, recoil_energy = (
                     conversion_foil.generate_recoil_particle(
-                        incident_energies,
-                        sampling_distribution,
+                        incident_energy_distribution,
                         include_kinematics,
                         include_stopping_power_loss,
                         z_sampling=z_sampling,
                         rng=rng,
                         y_restriction=y_restriction,
-                        continuous_energy_sampling=continuous_energy_sampling,
                     )
                 )
 

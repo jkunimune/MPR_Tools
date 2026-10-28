@@ -10,7 +10,7 @@ import multiprocessing as mp
 from tqdm import tqdm
 
 from .matter_interactions import Interaction, GenericInteraction, ElasticScattering, ComptonScattering, PairProduction, \
-    ProbabilityDistribution
+    ProbabilityDistribution, ContinuousProbabilityDistribution
 from .parallelization import run_concurrently
 from ..config.constants import AVOGADRO, FOIL_MATERIALS
 
@@ -308,7 +308,7 @@ class ConversionFoil:
     def _sample_scattered_ray(
         self,
         rng: np.random.Generator,
-        theta_distribution: ProbabilityDistribution,
+        theta_distribution: ContinuousProbabilityDistribution,
         attenuation: float,
         max_angle: float,
         y_restriction: Optional[Literal['positive', 'negative']] = None
@@ -361,30 +361,23 @@ class ConversionFoil:
     
     def generate_recoil_particle(
         self,
-        incident_energies: np.ndarray,
-        probability_distribution: np.ndarray,
+        incident_energy_distribution: ProbabilityDistribution,
         include_kinematics: bool = True,
         include_stopping_power_loss: bool = True,
         z_sampling: Literal['exp', 'uni'] = 'exp',
         rng: Optional[np.random.Generator] = None,
         y_restriction: Optional[Literal['positive', 'negative']] = None,
-        continuous_energy_sampling: bool = True,
     ) -> Tuple[float, float, float, float, float, float]:
         """
         Generate a scattered charged particle from incident particle interaction.
 
         Args:
-            incident_energies: Array of incident particle energies in MeV. One energy value per bin;
-                               the particle energy is sampled from this 1-D distribution.
-            probability_distribution: Probability weight for each bin in incident_energies (normalised
-                                 internally). Must include cross-section weighting before calling.
+            incident_energy_distribution: Probability distribution for drawing incident energies. Must include cross-section weighting before calling.
             include_kinematics: Include energy loss from non-perpendicular scattering.
             include_stopping_power_loss: Include SRIM energy loss calculation.
             z_sampling: Depth sampling method ('exp' for exponential, 'uni' for uniform).
             rng: Random number generator (pass the worker's RNG for thread safety).
             y_restriction: Restrict sampled y position to 'positive' or 'negative' half of foil.
-            continuous_energy_sampling: If True, sample energy continuously via inverse CDF
-                                        interpolation. If False, sample from the discrete bin centres.
 
         Returns:
             Tuple of (x0, y0, theta_scatter, phi_scatter, incident_energy, recoil_energy)
@@ -412,12 +405,6 @@ class ConversionFoil:
         angle_distributions = None
         interaction_weights = None
         attenuation = 0.0
-        
-        # Precompute inverse CDF for continuous energy sampling (multi-energy case only).
-        _cdf = None
-        if len(incident_energies) > 1 and continuous_energy_sampling:
-            _cdf = np.concatenate([[0.0], np.cumsum(probability_distribution[:-1] * np.diff(incident_energies))])
-            _cdf /= _cdf[-1]
 
         # Generate rays until one passes through aperture
         accepted = False
@@ -425,12 +412,7 @@ class ConversionFoil:
         rejected = 0
         while not accepted and rejected < 100:
             # Sample incident particle energy from weighted distribution
-            if _cdf is not None:
-                incident_energy = float(np.interp(rng.uniform(), _cdf, incident_energies))
-            elif len(incident_energies) > 1:
-                incident_energy = float(rng.choice(incident_energies, p=probability_distribution))
-            else:
-                incident_energy = float(incident_energies[0])
+            incident_energy = incident_energy_distribution.draw(rng)
             
             # Only recompute energy-dependent cross sections and angle distributions when the
             # incident energy changes
@@ -613,7 +595,7 @@ class ConversionFoil:
         seed_offset: int,
         interactions: list[Interaction],
         interaction_weights: np.ndarray,
-        angle_distributions: dict[Interaction, ProbabilityDistribution],
+        angle_distributions: dict[Interaction, ContinuousProbabilityDistribution],
         max_angle: float,
         progress_counter,
         progress_lock
@@ -684,7 +666,7 @@ class ConversionFoil:
         
         Args:
             incident_energies: Array of incident particle energies in MeV
-            energy_distribution: Distribution of incident particle energies (will be normalized)
+            energy_distribution: Distribution of incident particle energies (will be normalized and interpolated)
             num_recoil_particles: Number of recoil events to simulate
             
         Returns:
@@ -703,8 +685,10 @@ class ConversionFoil:
         for i in tqdm(range(num_recoil_particles), desc='Calculating proton energy distribution...'):
             # Generate scattered recoil particle and extract final energy
             _, _, _, _, _, recoil_energy = self.generate_recoil_particle(
-                incident_energies,
-                weighted_distribution,
+                ContinuousProbabilityDistribution(
+                    incident_energies,
+                    weighted_distribution,
+                ),
                 include_kinematics=True, 
                 include_stopping_power_loss=True
             )

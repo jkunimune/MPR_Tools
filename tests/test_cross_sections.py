@@ -8,7 +8,7 @@ from numpy import random, pi, isclose, empty, degrees, log, exp, hypot, median, 
 
 from MPR_Tools import ConversionFoil
 from MPR_Tools.core.matter_interactions import Interaction, GenericInteraction, ElasticScattering, ComptonScattering, \
-    PairProduction, ProbabilityDistribution
+    PairProduction, ContinuousProbabilityDistribution
 
 os.makedirs('tests/output/figures', exist_ok=True)
 
@@ -144,7 +144,7 @@ def test_z_sampling():
     )
     
     rng = random.default_rng(0)
-    dirac_delta = ProbabilityDistribution(array([-1e-20, 1e-20]), array([1, 1]))
+    dirac_delta = ContinuousProbabilityDistribution(array([-1e-20, 1e-20]), array([1, 1]))
     N = 10000
     x, y, z0, theta, phi = empty(N), empty(N), empty(N), empty(N), empty(N)
     for i in range(N):
