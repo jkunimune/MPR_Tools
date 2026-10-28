@@ -496,14 +496,22 @@ class ContinuousProbabilityDistribution:
             raise ValueError("the x-axis for a probability distribution must always be monotonically increasing.")
         self.min_value = values[0]
         self.max_value = values[-1]
+        
         # make a piecewise 1st-order polynomial out of the given PDF
-        intercepts = probability_densities[0:-1]
-        slopes = np.diff(probability_densities)/np.diff(values)
-        self.pdf = PPoly(
-            np.stack([slopes, intercepts], axis=0),
-            values, extrapolate=False)
-        # this object can then be integrated efficiently and exactly
-        self.cdf = self.pdf.antiderivative()
+        if self.max_value != self.min_value:
+            intercepts = probability_densities[0:-1]
+            slopes = np.diff(probability_densities)/np.diff(values)
+            self.pdf = PPoly(
+                np.stack([slopes, intercepts], axis=0),
+                values, extrapolate=False)
+            # this object can then be integrated efficiently and exactly
+            self.cdf = self.pdf.antiderivative()
+        # or, if there's only one probability, it gets a bit degenerate so do this hacky lambda stuff
+        else:
+            value = self.max_value
+            self.pdf = lambda x: np.inf if x == value else 0
+            self.cdf = lambda x: 0 if x < value else 1
+            self.cdf.solve = lambda x: [value]
     
     def integral(self, lower: float, upper: float):
         """

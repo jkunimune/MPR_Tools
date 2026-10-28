@@ -335,7 +335,7 @@ class MPRSpectrometer:
         rng = np.random.default_rng(seed_offset)
         
         # Precompute inverse CDF for continuous energy sampling
-        if len(incident_energies) > 1 and continuous_energy_sampling:
+        if continuous_energy_sampling:
             incident_energy_distribution = ContinuousProbabilityDistribution(incident_energies, sampling_distribution)
         else:
             incident_energy_distribution = DiscreteProbabilityDistribution(incident_energies, sampling_distribution)
