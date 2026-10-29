@@ -32,8 +32,8 @@ def test_energy_sampling():
     )
     
     # use a trapezoidal incident energy distribution
-    spectrum_energies = array([10., 12., 14., 16., 18.])
-    spectrum_values = array([0., 0., 1., 1., 0.])
+    spectrum_energies = array([10., 11., 13., 18.])
+    spectrum_values = array([0., 0., 1., 1.])
     with ProcessPoolExecutor(max_workers=4) as executor:
         spectrometer.generate_monte_carlo_rays(
             incident_energies=spectrum_energies,

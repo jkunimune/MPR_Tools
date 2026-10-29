@@ -248,11 +248,15 @@ class MPRSpectrometer:
         particles_per_process = num_recoil_particles // max_workers
         remaining_particles = num_recoil_particles % max_workers
 
-        # Weight energy distribution by scattering cross section
+        # Weight energy distribution by scattering cross section (integrated up to the max-angle)
         interaction_probability = np.zeros_like(probability_distribution)
-        for interaction in self.conversion_foil.interactions:
-            if interaction.recoil_particle == self.conversion_foil.particle:
-                interaction_probability += interaction.get_cross_section(incident_energies)
+        for i in range(len(probability_distribution)):
+            for interaction in self.conversion_foil.interactions:
+                if interaction.recoil_particle == self.conversion_foil.particle:
+                    cross_section = interaction.get_cross_section(incident_energies[i])
+                    angle_distribution = interaction.get_angle_distribution(incident_energies[i])
+                    angle_fraction = angle_distribution.integral(0, self.conversion_foil.max_angle)
+                    interaction_probability[i] += cross_section * angle_fraction
         weighted_distribution = probability_distribution * interaction_probability
         weighted_distribution /= np.sum(weighted_distribution)
 

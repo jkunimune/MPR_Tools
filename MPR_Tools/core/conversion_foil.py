@@ -59,11 +59,16 @@ class ConversionFoil:
             if aperture_radius is None:
                 raise ValueError("aperture_radius must be provided for circular apertures.")
             self.aperture_radius = aperture_radius * 1e-2      # cm to m
+            # Limit scattering angles for computational efficiency
+            self.max_angle = np.arctan((foil_radius + aperture_radius) / aperture_distance)  # rad
         elif aperture_type == 'rect':
             if aperture_width is None or aperture_height is None:
                 raise ValueError("aperture_width and aperture_height must be provided for rectangular apertures.")
             self.aperture_width = aperture_width * 1e-2        # cm to m
             self.aperture_height = aperture_height * 1e-2      # cm to m
+            # Limit scattering angles for computational efficiency
+            half_diag = np.sqrt((aperture_width / 2)**2 + (aperture_height / 2)**2)
+            self.max_angle = np.arctan((foil_radius + half_diag) / aperture_distance)  # rad
         else:
             raise ValueError(f"Unsupported aperture_type: {aperture_type!r}. Use 'circ' or 'rect'.")
 
@@ -310,7 +315,6 @@ class ConversionFoil:
         rng: np.random.Generator,
         theta_distribution: ContinuousProbabilityDistribution,
         attenuation: float,
-        max_angle: float,
         y_restriction: Optional[Literal['positive', 'negative']] = None
     ) -> Tuple[float, float, float, float, float]:
         """
@@ -350,7 +354,7 @@ class ConversionFoil:
         
         # Sample scattering angles
         phi_scatter = 2 * np.pi * rng.random()
-        theta_scatter = theta_distribution.draw(rng, upper=max_angle)
+        theta_scatter = theta_distribution.draw(rng, upper=self.max_angle)
         
         # Adjust initial coordinates for transport through foil
         x0 += z0 * np.tan(theta_scatter) * np.cos(phi_scatter)
@@ -386,13 +390,6 @@ class ConversionFoil:
         if rng is None:
             rng = np.random.default_rng()
 
-        # Limit scattering angles for computational efficiency
-        if self.aperture_type == 'circ':
-            max_angle = np.arctan((self.foil_radius + self.aperture_radius) / self.aperture_distance)
-        else:
-            half_diag = np.sqrt((self.aperture_width / 2)**2 + (self.aperture_height / 2)**2)
-            max_angle = np.arctan((self.foil_radius + half_diag) / self.aperture_distance)
-
         # Limit scattering to the interactions that actually scatter
         recoil_interactions = []
         for interaction in self.interactions:
@@ -423,7 +420,7 @@ class ConversionFoil:
                 for interaction in recoil_interactions:
                     angle_distributions[interaction] = interaction.get_angle_distribution(incident_energy)
                     weight = (interaction.get_cross_section(incident_energy) *
-                              angle_distributions[interaction].integral(0, max_angle))
+                              angle_distributions[interaction].integral(0, self.max_angle))
                     interaction_weights.append(weight)
                 interaction_weights = np.array(interaction_weights) / sum(interaction_weights)
 
@@ -440,7 +437,7 @@ class ConversionFoil:
 
             interaction = rng.choice(recoil_interactions, p=interaction_weights)
             x0, y0, z0, theta_scatter, phi_scatter = self._sample_scattered_ray(
-                rng, angle_distributions[interaction], attenuation, max_angle, y_restriction,
+                rng, angle_distributions[interaction], attenuation, y_restriction,
             )
 
             # Check if recoil particle passes through aperture
@@ -518,13 +515,6 @@ class ConversionFoil:
         
         print(f'\nEstimating intrinsic efficiency for {incident_energy:.3f} MeV particles using {max_workers} processes...')
         
-        # Limit scattering angles for computational efficiency
-        if self.aperture_type == 'circ':
-            max_angle = np.arctan((self.foil_radius + self.aperture_radius) / self.aperture_distance)
-        else:
-            half_diag = np.sqrt((self.aperture_width / 2)**2 + (self.aperture_height / 2)**2)
-            max_angle = np.arctan((self.foil_radius + half_diag) / self.aperture_distance)
-
         # Calculate scattering probability in foil (non-parallelizable part)
         total_xs = 0
         effective_xs = 0
@@ -538,7 +528,7 @@ class ConversionFoil:
                 angle_distributions[interaction] = interaction.get_angle_distribution(incident_energy)
                 interaction_weights.append(
                     interaction.get_cross_section(incident_energy) *
-                    angle_distributions[interaction].integral(0, max_angle))
+                    angle_distributions[interaction].integral(0, self.max_angle))
                 recoil_interactions.append(interaction)
         angular_factor = effective_xs/sum(interaction_weights)  # the factor by which our sampling density is increased because we're using max_angle
         interaction_weights = np.array(interaction_weights)/sum(interaction_weights)
@@ -561,7 +551,6 @@ class ConversionFoil:
                     recoil_interactions,
                     interaction_weights,
                     angle_distributions,
-                    max_angle,
                 ))
                 
         results = run_concurrently(
@@ -596,7 +585,6 @@ class ConversionFoil:
         interactions: list[Interaction],
         interaction_weights: np.ndarray,
         angle_distributions: dict[Interaction, ContinuousProbabilityDistribution],
-        max_angle: float,
         progress_counter,
         progress_lock
     ) -> Tuple[int, int]:
@@ -608,7 +596,6 @@ class ConversionFoil:
             seed_offset: Random seed offset for this worker
             interactions: Processes by which recoil particles are generated
             interaction_weights: Relative probability of each interaction process
-            max_angle: The maximum scattering angle to sample
             progress_counter: Shared counter for progress tracking
             progress_lock: Lock for thread-safe progress updates
             
@@ -629,7 +616,7 @@ class ConversionFoil:
                 # Sample scattered ray using helper method (no z-sampling for efficiency calculation)
                 interaction = rng.choice(interactions, p=interaction_weights)
                 x0, y0, _, theta_scatter, phi_scatter = self._sample_scattered_ray(
-                    rng, angle_distributions[interaction], max_angle=max_angle, attenuation=-np.inf
+                    rng, angle_distributions[interaction], attenuation=-np.inf
                 )
                 
                 # N.B. We do not consider the very small displacement due to foil thickness here
