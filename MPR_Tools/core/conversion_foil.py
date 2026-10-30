@@ -311,24 +311,24 @@ class ConversionFoil:
         return E, x
     
     def generate_monte_carlo_rays(
-            self,
-            incident_energies: np.ndarray,
-            probability_distribution: np.ndarray,
-            num_recoil_particles: int,
-            reference_energy: float,
-            stop_condition: Literal['attempts', 'successes'] = 'successes',
-            include_kinematics: bool = True,
-            include_stopping_power_loss: bool = True,
-            z_sampling: Literal['exp', 'uni'] = 'exp',
-            target_to_foil_distance: Optional[float] = None,
-            burn_duration: Optional[float] = None,
-            min_energy: float = 0,
-            max_energy: float = np.inf,
-            executor: Optional[Executor] = None,
-            max_workers: Optional[int] = None,
-            y_restriction: Optional[Literal['positive', 'negative']] = None,
-            continuous_energy_sampling: bool = True,
-            importance_sampling: bool = False,
+        self,
+        incident_energies: np.ndarray,
+        probability_distribution: np.ndarray,
+        num_recoil_particles: int,
+        reference_energy: float,
+        stop_condition: Literal['attempts', 'successes'] = 'successes',
+        include_kinematics: bool = True,
+        include_stopping_power_loss: bool = True,
+        z_sampling: Literal['exp', 'uni'] = 'exp',
+        target_to_foil_distance: Optional[float] = None,
+        burn_duration: Optional[float] = None,
+        min_energy: float = 0,
+        max_energy: float = np.inf,
+        executor: Optional[Executor] = None,
+        max_workers: Optional[int] = None,
+        y_restriction: Optional[Literal['positive', 'negative']] = None,
+        continuous_energy_sampling: bool = True,
+        importance_sampling: bool = False,
     ) -> np.ndarray:
         """
         Generate recoil rays from incident particle energy distribution using Monte Carlo with multiprocessing.
@@ -627,11 +627,11 @@ class ConversionFoil:
             return np.array(batch_results)
     
     def _sample_scattered_ray(
-            self,
-            rng: np.random.Generator,
-            theta_distribution: ContinuousProbabilityDistribution,
-            attenuation: float,
-            y_restriction: Optional[Literal['positive', 'negative']] = None
+        self,
+        rng: np.random.Generator,
+        theta_distribution: ContinuousProbabilityDistribution,
+        attenuation: float,
+        y_restriction: Optional[Literal['positive', 'negative']] = None
     ) -> Tuple[float, float, float, float, float]:
         """
         Sample a scattered ray from the foil.
