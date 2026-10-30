@@ -10,9 +10,9 @@ import multiprocessing as mp
 from tqdm import tqdm
 
 from .matter_interactions import Interaction, GenericInteraction, ElasticScattering, ComptonScattering, PairProduction, \
-    ProbabilityDistribution, ContinuousProbabilityDistribution
+    ContinuousProbabilityDistribution, DiscreteProbabilityDistribution
 from .parallelization import run_concurrently
-from ..config.constants import AVOGADRO, FOIL_MATERIALS
+from ..config.constants import AVOGADRO, FOIL_MATERIALS, LIGHT_SPEED, NEUTRON_MASS, MASS_TO_MEV
 
 
 class ConversionFoil:
@@ -310,12 +310,328 @@ class ConversionFoil:
 
         return E, x
     
-    def _sample_scattered_ray(
+    def generate_monte_carlo_rays(
+            self,
+            incident_energies: np.ndarray,
+            probability_distribution: np.ndarray,
+            num_recoil_particles: int,
+            reference_energy: float,
+            stop_condition: Literal['attempts', 'successes'] = 'successes',
+            include_kinematics: bool = True,
+            include_stopping_power_loss: bool = True,
+            z_sampling: Literal['exp', 'uni'] = 'exp',
+            target_to_foil_distance: Optional[float] = None,
+            burn_duration: Optional[float] = None,
+            min_energy: float = 0,
+            max_energy: float = np.inf,
+            executor: Optional[Executor] = None,
+            max_workers: Optional[int] = None,
+            y_restriction: Optional[Literal['positive', 'negative']] = None,
+            continuous_energy_sampling: bool = True,
+            importance_sampling: bool = False,
+    ) -> np.ndarray:
+        """
+        Generate recoil rays from incident particle energy distribution using Monte Carlo with multiprocessing.
+
+        Args:
+            incident_energies:   Array of incident particle energies in MeV.
+            probability_distribution: Relative probability for each energy bin. Normalized automatically.
+            num_recoil_particles: Target number of recoil particle trajectories to return.
+            stop_condition: How to interpret `num_recoil_particles`;
+                            should we go for a certain number of particle generation *attempts*, or
+                            for a certain number of successful (i.e. through the aperture) particle generations
+            reference_energy: Reference energy in MeV (this is needed because the outputs are relative to it)
+            include_kinematics: Include kinematic energy transfer.
+            include_stopping_power_loss: Include stopping power energy loss via SRIM.
+            z_sampling: Depth sampling method ('exp' or 'uni').
+            target_to_foil_distance: Distance from neutron source to foil in meters, for calculating time spread.
+                                     If None, arrival time is set to 0.
+            burn_duration: FWHM duration of the neutron source in seconds (assumed Gaussian).
+            min_energy: Don't generate recoil particles with less than this energy (MeV).
+            max_energy: Don't generate recoil particles with more than this energy (MeV).
+            executor: Pool of workers to use (if None, a new pool is created).
+            max_workers: Maximum number of worker processes (None -> CPU count).
+            y_restriction: Restrict sampled foil y position to 'positive' or 'negative' half.
+            continuous_energy_sampling: If True, sample energy continuously via inverse CDF. If False,
+                                        sample from discrete bin centres.
+            importance_sampling: If True, sample all energies with equal (uniform) probability and
+                                 attach a per-particle weight w = p_weighted(E) / p_uniform(E) so
+                                 that low-probability energies are sampled more uniformly while
+                                 preserving the correct weighted response.
+        
+        Return:
+            8xn array of [x0, p_x_relative, y0, p_y_relative, foil_time, energy_relative, incident_energy, importance_weight]
+        """
+        if max_workers is None:
+            max_workers = mp.cpu_count()
+        
+        print(f'Generating {num_recoil_particles} Monte Carlo {self.particle} trajectories using {max_workers} processes...')
+        
+        # Calculate recoil events per process
+        particles_per_process = num_recoil_particles // max_workers
+        remaining_particles = num_recoil_particles % max_workers
+        
+        # Weight energy distribution by scattering cross section (integrated up to the max-angle)
+        interaction_probability = np.zeros_like(probability_distribution)
+        for i in range(len(probability_distribution)):
+            for interaction in self.interactions:
+                if interaction.recoil_particle == self.particle:
+                    cross_section = interaction.get_cross_section(incident_energies[i])
+                    angle_distribution = interaction.get_angle_distribution(incident_energies[i])
+                    angle_fraction = angle_distribution.integral(0, self.max_angle)
+                    interaction_probability[i] += cross_section * angle_fraction
+        weighted_distribution = probability_distribution * interaction_probability
+        weighted_distribution /= np.sum(weighted_distribution)
+        
+        # With importance sampling, draw energies from a flat distribution and weight each
+        # particle by weighted_distribution / uniform_distribution (source biasing).
+        if importance_sampling:
+            sampling_distribution = np.ones_like(weighted_distribution) / len(weighted_distribution)
+        else:
+            sampling_distribution = weighted_distribution
+        
+        # Execute in parallel
+        worker_args = []
+        for i in range(max_workers):
+            batch_size = particles_per_process + (1 if i < remaining_particles else 0)
+            if batch_size > 0:  # Only submit if there's work to do
+                # Package all parameters for the worker
+                worker_args.append((
+                    batch_size,
+                    stop_condition,
+                    12345 + i * 1000,  # seed_offset
+                    incident_energies,
+                    sampling_distribution,
+                    include_kinematics,
+                    include_stopping_power_loss,
+                    z_sampling,
+                    reference_energy,
+                    target_to_foil_distance,
+                    burn_duration,
+                    min_energy,
+                    max_energy,
+                    y_restriction,
+                    continuous_energy_sampling,
+                    importance_sampling,
+                    weighted_distribution,
+                ))
+        
+        output_batches = run_concurrently(
+            self._generate_batch_worker, worker_args, executor,
+            progress_counter_total=num_recoil_particles,
+            task_title=f'Generating Monte Carlo {self.particle} trajectories',
+        )
+        
+        # Collect results
+        beam = np.concatenate(output_batches)
+        # Sanity check
+        if stop_condition == 'successes':
+            assert len(beam) == num_recoil_particles
+        
+        return beam
+        
+    # Class method worker function (used with multiprocessing)
+    def _generate_batch_worker(
         self,
-        rng: np.random.Generator,
-        theta_distribution: ContinuousProbabilityDistribution,
-        attenuation: float,
-        y_restriction: Optional[Literal['positive', 'negative']] = None
+        batch_size: int,
+        stop_condition: Literal['attempts', 'successes'],
+        seed_offset: int,
+        incident_energies: np.ndarray,
+        sampling_distribution: np.ndarray,
+        include_kinematics: bool,
+        include_stopping_power_loss: bool,
+        z_sampling: Literal['exp', 'uni'],
+        reference_energy: float,
+        target_to_foil_distance: Optional[float],
+        burn_duration: Optional[float],
+        min_energy: float,
+        max_energy: float,
+        y_restriction: Optional[Literal['positive', 'negative']],
+        continuous_energy_sampling: bool,
+        importance_sampling: bool,
+        importance_weights: np.ndarray,
+        progress_counter,
+        progress_lock,
+    ) -> np.ndarray:
+        """
+        Generate a batch of recoil particles in a separate process.
+
+        Each row of the returned array is:
+            [x0, p_x_relative, y0, p_y_relative, foil_time, energy_relative, incident_energy, importance_weight]
+        """
+        # Create an independent RNG for this worker to ensure reproducibility
+        rng = np.random.default_rng(seed_offset)
+        
+        # Precompute inverse CDF for continuous energy sampling
+        if continuous_energy_sampling:
+            incident_energy_distribution = ContinuousProbabilityDistribution(incident_energies, sampling_distribution)
+        else:
+            incident_energy_distribution = DiscreteProbabilityDistribution(incident_energies, sampling_distribution)
+        
+        particle_rest_energy = self.particle_mass * MASS_TO_MEV  # MeV
+        reference_gamma = 1 + reference_energy / particle_rest_energy   # Lorentz factor of the central ray
+        
+        # Limit scattering to the interactions that actually scatter
+        recoil_interactions = []
+        for interaction in self.interactions:
+            if interaction.recoil_particle == self.particle:
+                recoil_interactions.append(interaction)
+        
+        # Cache energy-dependent quantities to avoid recomputing them when the same energy is
+        # sampled twice in a row (i.e. for monoenergetic inputs).
+        previous_incident_energy = None
+        angle_distributions = None
+        interaction_weights = None
+        attenuation = 0.0
+        
+        # count both total and accepted particles
+        num_generated = 0
+        num_accepted = 0
+        batch_results = []
+        
+        while True:
+            if stop_condition == 'attempts':
+                if num_generated == batch_size:
+                    break
+            elif stop_condition == 'successes':
+                if num_accepted == batch_size:
+                    break
+            else:
+                raise ValueError(f"Unrecognized stop condition: {stop_condition!r}.")
+            if num_accepted == 0 and num_generated > 1000:
+                raise ValueError(f"Unable to generate a recoil particle that passes through the aperture and is in the energy range [{min_energy}, {max_energy}].")
+            
+            # Sample incident particle energy from weighted distribution
+            incident_energy = incident_energy_distribution.draw(rng)
+            
+            # Only recompute energy-dependent cross sections and angle distributions when the
+            # incident energy changes
+            if incident_energy != previous_incident_energy:
+                # Do the cross section calculations
+                angle_distributions = {}
+                interaction_weights = []
+                for interaction in recoil_interactions:
+                    angle_distributions[interaction] = interaction.get_angle_distribution(incident_energy)
+                    weight = (interaction.get_cross_section(incident_energy) *
+                              angle_distributions[interaction].integral(0, self.max_angle))
+                    interaction_weights.append(weight)
+                interaction_weights = np.array(interaction_weights) / sum(interaction_weights)
+                
+                # Attenuation coefficient for exponential depth sampling; 0 gives uniform sampling
+                if z_sampling == 'exp':
+                    attenuation = float(sum(
+                        interaction.get_cross_section(incident_energy)
+                        for interaction in self.interactions
+                    ))
+                else:
+                    attenuation = 0.0
+                
+                previous_incident_energy = incident_energy
+            
+            interaction = rng.choice(recoil_interactions, p=interaction_weights)
+            x0, y0, z0, theta_scatter, phi_scatter = self._sample_scattered_ray(
+                rng, angle_distributions[interaction], attenuation, y_restriction,
+            )
+            
+            num_generated += 1
+            
+            # Check if recoil particle passes through aperture
+            if self._check_aperture_acceptance(x0, y0, theta_scatter, phi_scatter):
+                # Initialize recoil energy
+                recoil_energy = interaction.get_recoil_energy(
+                    incident_energy,
+                    theta_scatter if include_kinematics else 0,
+                    rng)
+                
+                # Apply stopping power energy loss
+                if include_stopping_power_loss:
+                    path_length = (-z0) / np.cos(theta_scatter)
+                    recoil_energy = self.calculate_stopping_power_loss(recoil_energy, path_length)
+                
+                if recoil_energy <= 0:
+                    continue
+            else:
+                continue
+                
+            # Reject recoil particles outside the spectrometer acceptance window.
+            # This is the correct place to filter: for heavier recoils (e.g. deuterons),
+            # high-energy neutrons can still produce accepted recoils at large lab angles,
+            # so filtering on incident energy instead would wrongly exclude them.
+            if not (min_energy <= recoil_energy <= max_energy):
+                continue
+            
+            # Convert foil position and scattering angles to COSY phase-space coordinates
+            x_aperture = x0 + self.aperture_distance * np.tan(theta_scatter) * np.cos(phi_scatter)
+            y_aperture = y0 + self.aperture_distance * np.tan(theta_scatter) * np.sin(phi_scatter)
+            
+            total_distance = np.sqrt(
+                (x_aperture - x0)**2 + (y_aperture - y0)**2 +
+                self.aperture_distance**2)
+            sin_angle_x = (x_aperture - x0) / total_distance
+            sin_angle_y = (y_aperture - y0) / total_distance
+            
+            gamma = 1 + recoil_energy/particle_rest_energy  # Lorentz factor of the ray
+            p_relative = np.sqrt((gamma**2 - 1)/(reference_gamma**2 - 1))
+            p_x_relative = p_relative * sin_angle_x
+            p_y_relative = p_relative * sin_angle_y
+            
+            energy_relative = (recoil_energy - reference_energy) / reference_energy
+            
+            # Calculate foil arrival time
+            if self.incident_particle == 'photon':
+                velocity = LIGHT_SPEED  # m/s
+            elif self.incident_particle == 'neutron':
+                # Calculate velocity of the incident particle with its own relativistic correction
+                incident_rest_energy = NEUTRON_MASS * MASS_TO_MEV # MeV
+                incident_gamma = 1 + incident_energy / incident_rest_energy
+                velocity = LIGHT_SPEED * np.sqrt(1.0 - 1.0 / incident_gamma**2)  # m/s
+            else:
+                raise ValueError(f"Unsupported incident particle type: {self.incident_particle}")
+            foil_time = target_to_foil_distance / velocity if target_to_foil_distance else 0.0
+            
+            # Add Gaussian timing noise if burn duration is provided
+            if burn_duration:
+                # Convert FWHM burn duration to standard deviation for Gaussian noise
+                timing_noise = rng.normal(0, burn_duration / (2 * np.sqrt(2 * np.log(2))))
+                foil_time += timing_noise
+            
+            # Compute importance sampling weight: w = p_weighted(E) / p_uniform(E).
+            if importance_sampling:
+                if continuous_energy_sampling and len(incident_energies) > 1:
+                    e_range = incident_energies[-1] - incident_energies[0]
+                    particle_weight = float(
+                        np.interp(incident_energy, incident_energies, importance_weights)
+                    ) * e_range
+                else:
+                    idx = int(np.clip(
+                        np.searchsorted(incident_energies, incident_energy),
+                        0, len(incident_energies) - 1,
+                           ))
+                    particle_weight = importance_weights[idx] * len(incident_energies)
+            else:
+                particle_weight = 1.0
+            
+            num_accepted += 1
+            batch_results.append(
+                (x0, p_x_relative, y0, p_y_relative, foil_time, energy_relative, incident_energy, particle_weight)
+            )
+            
+            # Update progress counter thread-safely
+            with progress_lock:
+                progress_counter.value += 1
+        
+        # Consolidate in a numpy array, making sure it's the right shape even if we generated 0 rays
+        if len(batch_results) == 0:
+            return np.empty((0, 8))
+        else:
+            return np.array(batch_results)
+    
+    def _sample_scattered_ray(
+            self,
+            rng: np.random.Generator,
+            theta_distribution: ContinuousProbabilityDistribution,
+            attenuation: float,
+            y_restriction: Optional[Literal['positive', 'negative']] = None
     ) -> Tuple[float, float, float, float, float]:
         """
         Sample a scattered ray from the foil.
@@ -339,7 +655,7 @@ class ConversionFoil:
             y0 = -abs(radius_sample * np.sin(angle_sample))
         else:
             y0 = radius_sample * np.sin(angle_sample)
-            
+        
         # Sample depth
         if attenuation == -np.inf:
             z0 = 0.0  # Sample at exit surface
@@ -361,113 +677,13 @@ class ConversionFoil:
         y0 += z0 * np.tan(theta_scatter) * np.sin(phi_scatter)
         
         return x0, y0, z0, theta_scatter, phi_scatter
-
-    
-    def generate_recoil_particle(
-        self,
-        incident_energy_distribution: ProbabilityDistribution,
-        include_kinematics: bool = True,
-        include_stopping_power_loss: bool = True,
-        z_sampling: Literal['exp', 'uni'] = 'exp',
-        rng: Optional[np.random.Generator] = None,
-        y_restriction: Optional[Literal['positive', 'negative']] = None,
-    ) -> Tuple[float, float, float, float, float, float]:
-        """
-        Generate a scattered charged particle from incident particle interaction.
-
-        Args:
-            incident_energy_distribution: Probability distribution for drawing incident energies. Must include cross-section weighting before calling.
-            include_kinematics: Include energy loss from non-perpendicular scattering.
-            include_stopping_power_loss: Include SRIM energy loss calculation.
-            z_sampling: Depth sampling method ('exp' for exponential, 'uni' for uniform).
-            rng: Random number generator (pass the worker's RNG for thread safety).
-            y_restriction: Restrict sampled y position to 'positive' or 'negative' half of foil.
-
-        Returns:
-            Tuple of (x0, y0, theta_scatter, phi_scatter, incident_energy, recoil_energy)
-        """
-        # Use provided RNG or create a default one
-        if rng is None:
-            rng = np.random.default_rng()
-
-        # Limit scattering to the interactions that actually scatter
-        recoil_interactions = []
-        for interaction in self.interactions:
-            if interaction.recoil_particle == self.particle:
-                recoil_interactions.append(interaction)
-
-        # Cache energy-dependent quantities to avoid recomputing them when the same energy is
-        # sampled twice in a row (i.e. for monoenergetic inputs).
-        previous_incident_energy = None
-        angle_distributions = None
-        interaction_weights = None
-        attenuation = 0.0
-
-        # Generate rays until one passes through aperture
-        accepted = False
-        # Limit number of rejections to avoid infinite loops
-        rejected = 0
-        while not accepted and rejected < 100:
-            # Sample incident particle energy from weighted distribution
-            incident_energy = incident_energy_distribution.draw(rng)
-            
-            # Only recompute energy-dependent cross sections and angle distributions when the
-            # incident energy changes
-            if incident_energy != previous_incident_energy:
-                # Do the cross section calculations
-                angle_distributions = {}
-                interaction_weights = []
-                for interaction in recoil_interactions:
-                    angle_distributions[interaction] = interaction.get_angle_distribution(incident_energy)
-                    weight = (interaction.get_cross_section(incident_energy) *
-                              angle_distributions[interaction].integral(0, self.max_angle))
-                    interaction_weights.append(weight)
-                interaction_weights = np.array(interaction_weights) / sum(interaction_weights)
-
-                # Attenuation coefficient for exponential depth sampling; 0 gives uniform sampling
-                if z_sampling == 'exp':
-                    attenuation = float(sum(
-                        interaction.get_cross_section(incident_energy)
-                        for interaction in self.interactions
-                    ))
-                else:
-                    attenuation = 0.0
-
-                previous_incident_energy = incident_energy
-
-            interaction = rng.choice(recoil_interactions, p=interaction_weights)
-            x0, y0, z0, theta_scatter, phi_scatter = self._sample_scattered_ray(
-                rng, angle_distributions[interaction], attenuation, y_restriction,
-            )
-
-            # Check if recoil particle passes through aperture
-            if self._check_aperture_acceptance(x0, y0, theta_scatter, phi_scatter):
-                # Initialize recoil energy
-                recoil_energy = interaction.get_recoil_energy(
-                    incident_energy,
-                    theta_scatter if include_kinematics else 0,
-                    rng)
-                
-                # Apply stopping power energy loss
-                if include_stopping_power_loss:
-                    path_length = (-z0) / np.cos(theta_scatter)
-                    recoil_energy = self.calculate_stopping_power_loss(recoil_energy, path_length)
-
-                accepted = recoil_energy > 0
-            else:
-                rejected += 1
-
-        if not accepted:
-            raise ValueError("Unable to generate a recoil particle that passes through the aperture.")
-
-        return x0, y0, theta_scatter, phi_scatter, incident_energy, recoil_energy
     
     def _check_aperture_acceptance(
-        self, 
-        x0: float, 
-        y0: float, 
-        theta_scatter: float, 
-        phi_scatter: float
+            self,
+            x0: float,
+            y0: float,
+            theta_scatter: float,
+            phi_scatter: float
     ) -> bool:
         """
         Check if a scattered recoil particle passes through the aperture.
@@ -486,10 +702,49 @@ class ConversionFoil:
         if self.aperture_type == 'circ':
             return (x_aperture**2 + y_aperture**2) <= self.aperture_radius**2
         elif self.aperture_type == 'rect':
-            return (np.abs(x_aperture) <= self.aperture_width/2 and 
-                   np.abs(y_aperture) <= self.aperture_height/2)
+            return (np.abs(x_aperture) <= self.aperture_width/2 and
+                    np.abs(y_aperture) <= self.aperture_height/2)
         else:
             raise ValueError(f"Unsupported aperture type: {self.aperture_type}")
+    
+    def generate_recoil_particle(
+        self,
+        incident_energies: np.ndarray,
+        probability_distribution: np.ndarray,
+        reference_energy: float,
+        include_kinematics: bool = True,
+        include_stopping_power_loss: bool = True,
+        z_sampling: Literal['exp', 'uni'] = 'exp',
+        y_restriction: Optional[Literal['positive', 'negative']] = None,
+        continuous_energy_sampling: bool = True,
+    ) -> Tuple[float, float, float, float, float, float, float]:
+        """
+        Generate a scattered charged particle from incident particle interaction.
+
+        Args:
+            incident_energies:   Array of incident particle energies in MeV.
+            probability_distribution: Relative probability for each energy bin. Normalized automatically.
+            reference_energy: Reference energy in MeV (this is needed because the outputs are relative to it)
+            include_kinematics: Include energy loss from non-perpendicular scattering.
+            include_stopping_power_loss: Include SRIM energy loss calculation.
+            z_sampling: Depth sampling method ('exp' for exponential, 'uni' for uniform).
+            y_restriction: Restrict sampled y position to 'positive' or 'negative' half of foil.
+            continuous_energy_sampling: If True, sample energy continuously via inverse CDF. If False,
+                                        sample from discrete bin centres.
+        Returns:
+            Tuple of (x0, p_x_relative, y0, p_y_relative, foil_time, recoil_energy_relative, incident_energy)
+        """
+        x0, p_x_relative, y0, p_y_relative, foil_time, recoil_energy_relative, incident_energy, importance_weight = self.generate_monte_carlo_rays(
+            incident_energies, probability_distribution,
+            num_recoil_particles=1,
+            reference_energy=reference_energy,
+            include_kinematics=include_kinematics,
+            include_stopping_power_loss=include_stopping_power_loss,
+            z_sampling=z_sampling,
+            y_restriction=y_restriction,
+            continuous_energy_sampling=continuous_energy_sampling,
+        )[0]
+        return x0, p_x_relative, y0, p_y_relative, foil_time, recoil_energy_relative, incident_energy
     
     def calculate_efficiency(
         self, 
@@ -510,9 +765,6 @@ class ConversionFoil:
         Returns:
             Tuple of scattering, geometric, and total efficiency as fraction of incident particles
         """
-        if max_workers is None:
-            max_workers = mp.cpu_count()
-        
         print(f'\nEstimating intrinsic efficiency for {incident_energy:.3f} MeV particles using {max_workers} processes...')
         
         # Calculate scattering probability in foil (non-parallelizable part)
@@ -531,116 +783,29 @@ class ConversionFoil:
                     angle_distributions[interaction].integral(0, self.max_angle))
                 recoil_interactions.append(interaction)
         angular_factor = effective_xs/sum(interaction_weights)  # the factor by which our sampling density is increased because we're using max_angle
-        interaction_weights = np.array(interaction_weights)/sum(interaction_weights)
         
         scattering_efficiency = effective_xs * (1 - np.exp(-total_xs * self.thickness)) / total_xs
         
-        # Calculate samples per process
-        samples_per_process = num_samples // max_workers
-        remaining_samples = num_samples % max_workers
-        
-        # Execute in parallel
-        worker_args = []
-        for i in range(max_workers):
-            batch_size = samples_per_process + (1 if i < remaining_samples else 0)
-            if batch_size > 0:  # Only submit if there's work to do
-                # Package all parameters for the worker
-                worker_args.append((
-                    batch_size,
-                    12345 + i * 1000,  # seed_offset
-                    recoil_interactions,
-                    interaction_weights,
-                    angle_distributions,
-                ))
-                
-        results = run_concurrently(
-            self._calculate_efficiency_batch_worker, worker_args, executor,
-            progress_counter_total=num_samples,
-            task_title='Calculating geometric acceptance',
-        )
-        
-        # Collect results
-        total_accepted = 0
-        total_processed = 0
-        
-        for accepted_count, processed_count in results:
-            total_accepted += accepted_count
-            total_processed += processed_count
+        num_accepted_samples = len(self.generate_monte_carlo_rays(
+            np.array([incident_energy]),
+            np.array([1.0]),
+            num_recoil_particles=num_samples,
+            stop_condition='attempts',
+            executor=executor,
+            max_workers=max_workers,
+            reference_energy=1,  # it doesn't matter what this reference energy is because we're only looking at the number of acceptances
+        ))
         
         # Calculate final efficiencies
-        geometric_efficiency = total_accepted / total_processed / angular_factor if total_processed > 0 else 0.0
+        geometric_efficiency = num_accepted_samples / num_samples / angular_factor
         total_efficiency = scattering_efficiency * geometric_efficiency
         
-        print(f'Processed {total_processed} samples using {max_workers} processes')
+        print(f'Processed {num_samples} samples using {max_workers} processes')
         print(f'Scattering efficiency: {scattering_efficiency:.2e}')
-        print(f'Geometric efficiency: {geometric_efficiency:.2e}') 
+        print(f'Geometric efficiency: {geometric_efficiency:.2e}')
         print(f'Total efficiency: {total_efficiency:.2e}')
         
         return scattering_efficiency, geometric_efficiency, total_efficiency
-    
-    def _calculate_efficiency_batch_worker(
-        self,
-        batch_size: int,
-        seed_offset: int,
-        interactions: list[Interaction],
-        interaction_weights: np.ndarray,
-        angle_distributions: dict[Interaction, ContinuousProbabilityDistribution],
-        progress_counter,
-        progress_lock
-    ) -> Tuple[int, int]:
-        """
-        Generate a batch of efficiency samples in a separate process.
-        
-        Args:
-            batch_size: Number of samples to process in this batch
-            seed_offset: Random seed offset for this worker
-            interactions: Processes by which recoil particles are generated
-            interaction_weights: Relative probability of each interaction process
-            progress_counter: Shared counter for progress tracking
-            progress_lock: Lock for thread-safe progress updates
-            
-        Returns:
-            Tuple of (accepted_count, processed_count)
-        """
-        # Create independent random number generator
-        rng = np.random.default_rng(seed_offset)
-        
-        accepted_count = 0
-        processed_count = 0
-        update_interval = max(1, batch_size // 100)  # Update progress every 1%
-        
-        for i in range(batch_size):
-            try:
-                processed_count += 1
-                
-                # Sample scattered ray using helper method (no z-sampling for efficiency calculation)
-                interaction = rng.choice(interactions, p=interaction_weights)
-                x0, y0, _, theta_scatter, phi_scatter = self._sample_scattered_ray(
-                    rng, angle_distributions[interaction], attenuation=-np.inf
-                )
-                
-                # N.B. We do not consider the very small displacement due to foil thickness here
-
-                # Check aperture acceptance using the same logic as the original
-                if self._check_aperture_acceptance(x0, y0, theta_scatter, phi_scatter):
-                    accepted_count += 1
-                
-                # Update progress counter thread-safely at intervals
-                if i % update_interval == 0:
-                    with progress_lock:
-                        progress_counter.value += update_interval
-                        
-            except Exception:
-                # Skip failed calculations but still count as processed
-                pass
-        
-        # Final update for any remaining samples
-        remaining = batch_size % update_interval
-        if remaining > 0:
-            with progress_lock:
-                progress_counter.value += remaining
-        
-        return accepted_count, processed_count
     
     def get_recoil_energy_distribution(
         self, 
@@ -671,15 +836,14 @@ class ConversionFoil:
         
         for i in tqdm(range(num_recoil_particles), desc='Calculating proton energy distribution...'):
             # Generate scattered recoil particle and extract final energy
-            _, _, _, _, _, recoil_energy = self.generate_recoil_particle(
-                ContinuousProbabilityDistribution(
-                    incident_energies,
-                    weighted_distribution,
-                ),
-                include_kinematics=True, 
+            _, _, _, _, _, recoil_energy_relative, _ = self.generate_recoil_particle(
+                incident_energies,
+                weighted_distribution,
+                reference_energy=1,
+                include_kinematics=True,
                 include_stopping_power_loss=True
             )
             
-            recoil_energies[i] = recoil_energy
+            recoil_energies[i] = 1 + recoil_energy_relative
             
         return recoil_energies

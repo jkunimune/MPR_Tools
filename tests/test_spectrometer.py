@@ -73,6 +73,7 @@ def test_energy_sampling():
     plt.savefig("tests/output/figures/test_energy_sampling.png")
     plt.close()
     
+    assert len(sampled_energies) == 10_000
     assert isclose(
         integrate.trapezoid(energy_bins*theoretical_spectrum, energy_bins)/
             integrate.trapezoid(theoretical_spectrum, energy_bins),
@@ -146,6 +147,8 @@ def test_importance_sampling():
     plt.savefig("tests/output/figures/test_importance_sampling.png")
     plt.close()
     
+    assert len(raw_energies) == 10_000
+    assert len(fancy_energies) == 10_000
     assert all(raw_weights == 1)
     assert not all(fancy_weights == 1)
     assert isclose(
