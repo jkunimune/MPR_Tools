@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import Executor
 from typing import Dict, Tuple, Optional, Union
-import warnings
 import numpy as np
 import pandas as pd
 from scipy.stats import gaussian_kde
@@ -583,35 +582,33 @@ class PerformanceAnalyzer:
 
         return df
     
-    def _load_performance_curve(self, performance_curve_file: Optional[str] = None) -> Optional[pd.DataFrame]:
+    def _load_performance_curve(self, performance_curve_file: Optional[str] = None) -> pd.DataFrame:
         filename = performance_curve_file or 'comprehensive_performance.csv'
         try:
             return pd.read_csv(f'{self.spectrometer.data_directory}/{filename}')
-        except Exception:
-            warnings.warn(
+        except FileNotFoundError:
+            raise FileNotFoundError(
                 f'Performance curve {filename} not found in {self.spectrometer.data_directory}. '
-                'Run generate_performance_curve() first.',
-                RuntimeWarning,
-            )
-            return None
+                'Run generate_performance_curve() first.')
 
     @staticmethod
     def _get_foil_efficiencies(
         spec: MPRSpectrometer,
-        performance_df: Optional[pd.DataFrame],
+        performance_df: pd.DataFrame,
     ) -> np.ndarray:
         """Interpolate per-particle foil efficiency from the performance curve."""
         df = performance_df
-        if df is not None and 'foil' in df.columns:
+        if 'foil' in df.columns:
             df = df[df['foil'] == spec.conversion_foil.foil_material]
         input_energies = spec.input_beam[:, 6]
-        if df is not None and len(df) > 0:
+        if len(df) > 0:
             return np.interp(
                 input_energies,
                 df['energy [MeV]'].to_numpy(),
                 df['total efficiency'].to_numpy(),
             )
-        return np.ones(len(input_energies))
+        else:
+            raise ValueError("the performance dataframe is empty, or has the wrong foil.")
 
     def build_response_matrix(
         self,
